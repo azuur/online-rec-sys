@@ -8,10 +8,11 @@ import random
 from typing import Annotated
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Form, Request, Response, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from httpx import AsyncClient
 from langchain_openai import OpenAIEmbeddings
+import numpy as np
 from online_learning_demo.config import PGConfig, TMDBConfig
 from psycopg import AsyncConnection
 
@@ -63,7 +64,7 @@ async def get_recsys_model():
 
 
 class Vectorizer:
-    def __init__(self, model) -> None:
+    def __init__(self, model: OpenAIEmbeddings) -> None:
         self.model = model
 
     async def __call__(self, doc: str) -> list[float]:
@@ -136,6 +137,10 @@ async def get_recs(
     logger.debug("Getting recommendations for user...")
     n_random = int(p_random * k)
     recs = await recsys_repo.aget_rec_by_user_id(user_id, k - n_random, offset)
+
+    # This happens when a user doesn't exist yet
+    if not recs:
+        return recs
 
     random_recs = []
     if n_random:
@@ -222,13 +227,29 @@ async def add_to_batch(
     )
     logger.debug("Adding movies to batch... SUCCESS")
 
-    n_in_batch = await recsys_repo.aget_current_batch_size(user_id)
+    batch_labels = [b[2] for b in (await recsys_repo.aget_current_batch(user_id))]
+    n_in_batch = len(batch_labels)
 
-    batch_has_both = any(labels) and not all(labels)
+    batch_has_both = any(batch_labels) and not all(batch_labels)
     if n_in_batch >= max_n_in_batch and batch_has_both:
         await update_user_vec(
             recsys_repo, recsys_model, user_id, normalized_lr=normalized_lr
         )
+        return True
+    return False
+
+
+async def initialize_user(
+    recsys_repo: OnlineRecSysRepo, vectorizer: Vectorizer, user_id: int
+):
+    if user_id > 100 or user_id < 1:
+        raise Exception("We only support 100 users for now")
+
+    vec = np.random.randn(1536)
+    vec = vec / np.sqrt(vec.dot(vec))
+    vec = vec.tolist()
+
+    await recsys_repo.ainitialize_user(user_id, vec)
 
 
 async def amain_test():
@@ -275,14 +296,14 @@ app = FastAPI()
 
 MAX_N_BATCH = 5
 NORMALIZED_LR = 0.3
-templates = Jinja2Templates(directory="online_learning_demo/templates")
+templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
 app.mount(
     "/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static"
 )
 
 
-@app.get("/{user_id}")
+@app.get("/home/{user_id}/")
 async def user_home(
     user_id: int,
     request: Request,
@@ -302,17 +323,30 @@ async def user_home(
         k=limit,
         offset=offset,
     )
-    for r in recs:
+    if not recs:
+        await initialize_user(recsys_repo, vectorizer, user_id)
+        recs = await get_movies(
+            query=query,
+            recsys_repo=recsys_repo,
+            tmdb_gateway=tmdb_gateway,
+            vectorizer=vectorizer,
+            user_id=user_id,
+            k=limit,
+            offset=offset,
+        )
+
+    for i, r in enumerate(recs):
         r["user_id"] = user_id
         r["query"] = query
-    recs[-1]["offset"] = offset + limit
+        r["num"] = i + offset + 1
+    recs[-1]["offset"] = offset + len(recs)
     recs[-1]["limit"] = limit
 
     return templates.TemplateResponse("home.html", {"movies": recs, "request": request})
 
 
 @app.get("/next/")
-async def _(
+async def next(
     user_id: int,
     query: str | None,
     request: Request,
@@ -331,10 +365,11 @@ async def _(
         k=limit,
         offset=offset,
     )
-    for r in recs:
+    for i, r in enumerate(recs):
         r["user_id"] = user_id
         r["query"] = query
-    recs[-1]["offset"] = offset + limit
+        r["num"] = i + offset + 1
+    recs[-1]["offset"] = offset + len(recs)
     recs[-1]["limit"] = limit
 
     return templates.TemplateResponse("rows.html", {"movies": recs, "request": request})
@@ -381,10 +416,11 @@ async def _(
         k=limit,
         offset=offset,
     )
-    for r in recs:
+    for i, r in enumerate(recs):
         r["user_id"] = user_id
         r["query"] = query
-    recs[-1]["offset"] = offset + limit
+        r["num"] = i + offset + 1
+    recs[-1]["offset"] = offset + len(recs)
     recs[-1]["limit"] = limit
 
     return templates.TemplateResponse("rows.html", {"movies": recs, "request": request})
@@ -414,12 +450,11 @@ async def _(
     user_id: int,
     movie_id: str,
     label: bool,
-    request: Request,
     response: Response,
     recsys_repo: Annotated[OnlineRecSysRepo, Depends(get_recsys_repo)],
     recsys_model: Annotated[OnlineRecSysModel, Depends(get_recsys_model)],
 ):
-    await add_to_batch(
+    refreshed_preferences = await add_to_batch(
         recsys_repo,
         recsys_model,
         MAX_N_BATCH,
@@ -430,10 +465,18 @@ async def _(
     )
 
     # response.headers["HX-Refresh"] = "true"
+    if refreshed_preferences:
+        redirect_url = (
+            app.url_path_for("next") + f"?user_id={user_id}&offset=0&limit=15&query="
+        )
+        # headers = {"HX-Refresh": "true"}
+        return RedirectResponse(redirect_url, status_code=status.HTTP_303_SEE_OTHER)
+    response.headers["HX-Reswap"] = "none"
 
-    redirect_url = request.url_for("user_home", user_id=user_id)
-    # headers = {"HX-Refresh": "true"}
-    return RedirectResponse(redirect_url, status_code=status.HTTP_303_SEE_OTHER)
+
+@app.get("/favicon.ico")
+async def favicon():
+    return FileResponse(Path(__file__).parent / "static" / "favicon.ico")
 
 
 # if __name__ == "__main__":

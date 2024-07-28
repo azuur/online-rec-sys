@@ -326,6 +326,15 @@ class OnlineRecSysRepo:
             )
         await self.aconn.commit()
 
+    async def ainitialize_user(self, user_id: int, vec: list[float]):
+        async with self.aconn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO users_current (id, vec) VALUES (%s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET vec = EXCLUDED.vec",
+                (user_id, str(vec)),
+            )
+        await self.aconn.commit()
+
 
 class AsyncOperationWithSemaphore[K, V]:
     def __init__(
