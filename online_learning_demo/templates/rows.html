@@ -1,10 +1,10 @@
 {% for movie in movies %}
 {% if loop.last %}
-<div class="movie fade-me-out" hx-trigger="revealed"
+<div id="movie{{ movie.num }}" class="movie" hx-trigger="revealed"
     hx-get="/next/?user_id={{ movie.user_id }}&offset={{ movie.offset }}&limit={{ movie.limit }}&query={{ movie.query }}"
     hx-target="#recs" hx-swap="beforeend" hx-indicator="#bars">
     {% else %}
-    <div class="movie fade-me-out">
+    <div id="movie{{ movie.num }}" class="movie">
         {% endif %}
         <div class="poster">
             <img src="data:image/jpeg;base64,{{ movie.poster_bytes }}" alt="{{ movie.title }} Poster">
@@ -17,11 +17,14 @@
                 %}</div>
             <div class="actions">
                 <button class="thumbs-up"
-                    hx-post="/feedback/?user_id={{ movie.user_id }}&movie_id={{ movie.id }}&label=true" hx-target="#all"
-                    hx-swap="outerHTML swap:1s show:window:top">👍</button>
+                    hx-post="/feedback/?user_id={{ movie.user_id }}&movie_id={{ movie.id }}&label=true"
+                    hx-target="#recs" hx-swap="innerHTML swap:1s show:window:top" hx-indicator="#bars{{ movie.num }}"
+                    data-loading-target="#recs">👍</button>
                 <button class="thumbs-down"
                     hx-post="/feedback/?user_id={{ movie.user_id }}&movie_id={{ movie.id }}&label=false"
-                    hx-target="#all" hx-swap="outerHTML swap:1s show:window:top">👎</button>
+                    hx-target="#recs" hx-swap="innerHTML swap:1s show:window:top" hx-indicator="#bars{{ movie.num }}"
+                    data-loading-target="#recs">👎</button>
+                <img id="bars{{ movie.num }}" class="htmx-indicator" src="/static/bars.svg">
                 <!-- <button class="thumbs-up" hx-post="/feedback/?user_id={{ movie.user_id }}&movie_id={{ movie.id }}&label=true" hx-swap="none">👍</button>
             <button class="thumbs-down" hx-post="/feedback/?user_id={{ movie.user_id }}&movie_id={{ movie.id }}&label=false" hx-swap="none">👎</button> -->
             </div>

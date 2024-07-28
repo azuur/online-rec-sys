@@ -94,11 +94,30 @@
             margin-right: 5px;
             border: none;
             background: none;
+            transition: background-color 0.3s ease;
+        }
+
+        .thumbs-up {
+            background-color: lightgreen;
+        }
+
+        .thumbs-down {
+            background-color: lightcoral;
+        }
+
+        .thumbs-up.clicked {
+            background-color: green;
+            color: white;
+        }
+
+        .thumbs-down.clicked {
+            background-color: red;
+            color: white;
         }
 
         .fade-me-out.htmx-swapping {
             opacity: 0;
-            transition: opacity 1s ease-out;
+            transition: opacity 200ms ease-out;
         }
     </style>
 </head>
@@ -115,18 +134,81 @@
         <input class="form-control" type="search" name="query" placeholder="Find a movie..." hx-post="/search/"
             hx-vals='{"user_id": "{{ movies[0].user_id }}", "limit": "15", "offset": "0"}'
             hx-trigger="input changed delay:1000ms, search" hx-target="#recs" hx-indicator="#search-indicator">
-        <div id="recs">
+        <div id="recs" class="fade-me-out">
             {% with movies=movies %}
             {% include 'rows.html' %}
             {% endwith %}
         </div>
         <img id="bars" class="htmx-indicator" src="/static/bars.svg" width="60">
-        <script>
-            window.onbeforeunload = function () {
-                window.scrollTo(0, 0);
-            }
-        </script>
     </div>
+    <script>
+        function scrollToTop() {
+            window.scrollTo(0, 0);
+        }
+
+        function addColorChange() {
+            const thumbsUpButtons = document.querySelectorAll('.thumbs-up');
+            const thumbsDownButtons = document.querySelectorAll('.thumbs-down');
+
+            thumbsUpButtons.forEach(button => {
+                if (!button.hasAttribute('data-listener-added')) {
+                    button.addEventListener('click', function () {
+                        this.classList.toggle('clicked');
+                        // Optionally, if you want to unclick thumbs down when thumbs up is clicked
+                        // if (this.nextElementSibling) {
+                        //     this.nextElementSibling.classList.remove('clicked');
+                        // }
+                    });
+                    button.setAttribute('data-listener-added', 'true');
+                }
+            });
+
+            thumbsDownButtons.forEach(button => {
+                if (!button.hasAttribute('data-listener-added')) {
+                    button.addEventListener('click', function () {
+                        this.classList.toggle('clicked');
+                        // Optionally, if you want to unclick thumbs down when thumbs up is clicked
+                        // if (this.nextElementSibling) {
+                        //     this.nextElementSibling.classList.remove('clicked');
+                        // }
+                    });
+                    button.setAttribute('data-listener-added', 'true');
+                }
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            addColorChange();
+
+            // Select the target node (the div you want to observe)
+            const targetNode = document.querySelector('#all');
+
+            // Options for the observer (which mutations to observe)
+            const config = { childList: true, subtree: true };
+
+            // Callback function to execute when mutations are observed
+            const callback = function (mutationsList, observer) {
+                for (const mutation of mutationsList) {
+                    if (mutation.type === 'childList') {
+                        addColorChange();
+                    }
+                }
+            };
+
+            // Create an observer instance linked to the callback function
+            const observer = new MutationObserver(callback);
+
+
+
+            // Start observing the target node for configured mutations
+            observer.observe(targetNode, config);
+
+            const scrollTargetNode = document.querySelector('#movie1')
+            const scrollUpObserver = new MutationObserver(scrollToTop);
+            scrollUpObserver.observe(scrollTargetNode, config)
+        })
+
+    </script>
 </body>
 
 </html>
