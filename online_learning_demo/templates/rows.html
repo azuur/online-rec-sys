@@ -1,0 +1,30 @@
+{% for movie in movies %}
+<div class="movie fade-me-out">
+    {% if loop.last %}
+    <div class="poster" hx-trigger="revealed"
+        hx-get="/next/?user_id={{ movie.user_id }}&offset={{ movie.offset }}&limit={{ movie.limit }}" hx-target="#recs"
+        hx-swap="beforeend" hx-indicator="#bars">
+        {% else %}
+        <div class="poster">
+            {% endif %}
+            <img src="data:image/jpeg;base64,{{ movie.poster_bytes }}" alt="{{ movie.title }} Poster">
+        </div>
+        <div class="details">
+            <div class="title">{{ movie.title }}</div>
+            <div class="subtitle">{{ movie.subtitle }}</div>
+            <div class="score">Score: {{ (100 * movie.score) | round | int }}%</div>
+            <div class="synopsis">{{ movie.synopsis[:400] | wordwrap }}{% if movie.synopsis|length > 400 %}...{% endif
+                %}</div>
+            <div class="actions">
+                <button class="thumbs-up"
+                    hx-post="/feedback/?user_id={{ movie.user_id }}&movie_id={{ movie.id }}&label=true" hx-target="#all"
+                    hx-swap="outerHTML swap:1s show:window:top">👍</button>
+                <button class="thumbs-down"
+                    hx-post="/feedback/?user_id={{ movie.user_id }}&movie_id={{ movie.id }}&label=false"
+                    hx-target="#all" hx-swap="outerHTML swap:1s show:window:top">👎</button>
+                <!-- <button class="thumbs-up" hx-post="/feedback/?user_id={{ movie.user_id }}&movie_id={{ movie.id }}&label=true" hx-swap="none">👍</button>
+            <button class="thumbs-down" hx-post="/feedback/?user_id={{ movie.user_id }}&movie_id={{ movie.id }}&label=false" hx-swap="none">👎</button> -->
+            </div>
+        </div>
+    </div>
+    {% endfor %}

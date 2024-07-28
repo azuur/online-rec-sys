@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movie Grid</title>
+    <style>
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 16px;
+            padding: 20px;
+        }
+        .card {
+            background-color: #f8f8f8;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            flex-direction: column;
+            justify-content: space-between;
+            overflow: hidden;
+            text-align: center;
+            padding: 16px;
+        }
+        .card-body {
+            padding: 16px;
+            flex-direction: column;
+            flex-grow: 1; /* Allow body to grow */
+            max-height: 10em;
+        }
+        .card-title {
+            font-size: 1em;
+            margin: 0 0 8px;
+            white-space: nowrap; /* Ensure titles are shown in one line */
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .card-subtitle {
+            font-size: 0.7em;
+            color: #777;
+            margin: 0 0 8px;
+        }
+        .card-text {
+            font-size: 0.8em;
+            color: #555;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .card-score {
+            font-size: 1em;
+            color: #000;
+            margin-top: 8px;
+        }
+        .synopsis {
+            flex-grow: 1; /* Allow synopsis to fill available space */
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+        .synopsis.expanded {
+            max-height: none; /* Remove the height restriction when expanded */
+        }
+        .toggle-link {
+            color: #007BFF;
+            cursor: pointer;
+            text-decoration: underline;
+            font-size: 0.9em; /* Smaller font size for the link */
+        }
+    </style>
+</head>
+<body>
+    <div class="grid-container">
+        {% for movie in movies %}
+        <div class="card">
+            <div class="card-body">
+                <h2 class="card-title">{{ movie.title }}</h2>
+                <div class="card-score">Score: {{ movie.score | round(2) }}</div>
+                <h3 class="card-subtitle">{{ movie.subtitle }}</h3>
+                <p class="card-text synopsis">{{ movie.synopsis }}</p>
+                <span class="toggle-link" onclick="toggleSynopsis(this)">See More</span>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    <script>
+        function toggleSynopsis(element) {
+            const synopsis = element.previousElementSibling;
+            synopsis.classList.toggle('expanded');
+            element.textContent = synopsis.classList.contains('expanded') ? 'See Less' : 'See More';
+        }
+    </script>
+</body>
+</html>

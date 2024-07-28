@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movie Recommendations</title>
+    <script src="https://unpkg.com/htmx.org@2.0.1"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .main-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .movie {
+            display: flex;
+            margin-bottom: 20px;
+            /* margin-left: 400px; */
+            /* border-bottom: 1px solid #ccc; */
+            padding-bottom: 10px;
+            width: 80%;
+            justify-content: center;
+        }
+
+        .poster {
+            margin-right: 20px;
+        }
+
+        .poster img {
+            max-width: 154px;
+        }
+
+        .details {
+            max-width: 700px;
+        }
+
+        .title {
+            font-size: 1.5em;
+            margin: 0;
+        }
+
+        .subtitle {
+            color: #666;
+        }
+
+        .score {
+            font-weight: bold;
+            color: #333;
+        }
+
+        .synopsis {
+            margin-top: 10px;
+            text-wrap: balance;
+        }
+
+        .actions {
+            margin-top: 10px;
+        }
+
+        .thumbs-up,
+        .thumbs-down {
+            cursor: pointer;
+            font-size: 20px;
+            margin-right: 5px;
+            border: none;
+            background: none;
+        }
+
+        .fade-me-out.htmx-swapping {
+            opacity: 0;
+            transition: opacity 1s ease-out;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="all" class="main-content fade-me-out">
+        <h1>Movie Recommendations</h1>
+        <div id="recs">
+            {% with movies=movies %}
+            {% include 'rows.html' %}
+            {% endwith %}
+        </div>
+        <img id="bars" class="htmx-indicator" src="/static/bars.svg" width="60">
+        <script>
+            window.onbeforeunload = function () {
+                window.scrollTo(0, 0);
+            }
+        </script>
+    </div>
+</body>
+
+</html>
