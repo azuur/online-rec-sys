@@ -131,7 +131,7 @@ async def update_user_vec(
         vec, (X, Y), normalized_lr=normalized_lr
     )
 
-    new_batch_id = await recsys_repo.amove_current_batch_to_historical(1)
+    new_batch_id = await recsys_repo.amove_current_batch_to_historical(user_id)
 
     await recsys_repo.aupdate_user(user_id, new_batch_id, updated_user_emb)
     logger.debug("Updating user vector with batch... SUCCESS")
