@@ -1,12 +1,12 @@
 {% for movie in movies %}
-<div class="movie fade-me-out">
-    {% if loop.last %}
-    <div class="poster" hx-trigger="revealed"
-        hx-get="/next/?user_id={{ movie.user_id }}&offset={{ movie.offset }}&limit={{ movie.limit }}" hx-target="#recs"
-        hx-swap="beforeend" hx-indicator="#bars">
-        {% else %}
+{% if loop.last %}
+<div class="movie fade-me-out" hx-trigger="revealed"
+    hx-get="/next/?user_id={{ movie.user_id }}&offset={{ movie.offset }}&limit={{ movie.limit }}&query={{ movie.query }}"
+    hx-target="#recs" hx-swap="beforeend" hx-indicator="#bars">
+    {% else %}
+    <div class="movie fade-me-out">
+        {% endif %}
         <div class="poster">
-            {% endif %}
             <img src="data:image/jpeg;base64,{{ movie.poster_bytes }}" alt="{{ movie.title }} Poster">
         </div>
         <div class="details">

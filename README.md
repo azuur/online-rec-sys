@@ -16,7 +16,7 @@
 ### Front end
 
 - Add some sort of animation/coloring after thumbs up/down clicks, to show something is happening.
-
+- Add a search bar
 
 ### Technical debt
 

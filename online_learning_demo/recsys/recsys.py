@@ -183,20 +183,23 @@ class OnlineRecSysRepo:
             res = await res.fetchall()
             return res
 
-    async def aget_rec_from_vector(self, vec: list[float], k: int = 5):
+    async def aget_rec_from_vector(self, vec: list[float], k: int = 5, offset: int = 0):
         sql = """
         SELECT
             movies_all.id,
             movies_all.title,
             movies_all.synopsis,
             movies_all.tags, 
-            (2 - (movies_all.vec <=> %s)) / 2 AS score 
+            (2 - (movies_all.vec <=> %(vec)s)) / 2 AS score 
         FROM movies_all
         ORDER BY score DESC
-        LIMIT %s;
+        OFFSET %(offset)s
+        LIMIT %(limit)s;
         """
         async with self.aconn.cursor() as cur:
-            res = await cur.execute(sql, (vec, k))
+            res = await cur.execute(
+                sql, {"vec": str(vec), "limit": k, "offset": offset}
+            )
             res = await res.fetchall()
             return res
 

@@ -7,10 +7,11 @@ from pathlib import Path
 import random
 from typing import Annotated
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Request, Response, status
+from fastapi import Depends, FastAPI, Form, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from httpx import AsyncClient
+from langchain_openai import OpenAIEmbeddings
 from online_learning_demo.config import PGConfig, TMDBConfig
 from psycopg import AsyncConnection
 
@@ -61,6 +62,69 @@ async def get_recsys_model():
     return OnlineRecSysModel()
 
 
+class Vectorizer:
+    def __init__(self, model) -> None:
+        self.model = model
+
+    async def __call__(self, doc: str) -> list[float]:
+        return (await self.model.aembed_documents([doc]))[0]
+
+
+def get_vectorizer():
+    model = OpenAIEmbeddings()
+    return Vectorizer(model)
+
+
+async def get_movies(
+    query: str | None,
+    recsys_repo: OnlineRecSysRepo,
+    tmdb_gateway: TMDBGateway,
+    vectorizer: Vectorizer,
+    user_id: int,
+    k: int = 20,
+    p_random: float = 0.0,
+    offset: int = 0,
+):
+    if not query:
+        return await get_recs(
+            recsys_repo=recsys_repo,
+            tmdb_gateway=tmdb_gateway,
+            user_id=user_id,
+            k=k,
+            p_random=p_random,
+            offset=offset,
+        )
+
+    return await get_from_query(
+        query=query,
+        recsys_repo=recsys_repo,
+        tmdb_gateway=tmdb_gateway,
+        vectorizer=vectorizer,
+        k=k,
+        offset=offset,
+    )
+
+
+async def get_from_query(
+    query: str,
+    recsys_repo: OnlineRecSysRepo,
+    tmdb_gateway: TMDBGateway,
+    vectorizer: Vectorizer,
+    k: int = 20,
+    offset: int = 0,
+):
+    logger.debug("Getting items from search...")
+
+    vec = await vectorizer(query)  # TODO: cache this
+    recs = await recsys_repo.aget_rec_from_vector(vec, k, offset)
+    recs = [
+        {"id": r[0], "title": r[1], "synopsis": r[2], "subtitle": r[3], "score": r[4]}
+        for r in recs
+    ]
+
+    return await _add_movie_posters(recs, recsys_repo, tmdb_gateway)
+
+
 async def get_recs(
     recsys_repo: OnlineRecSysRepo,
     tmdb_gateway: TMDBGateway,
@@ -86,6 +150,12 @@ async def get_recs(
         for r in recs
     ]
 
+    return await _add_movie_posters(recs, recsys_repo, tmdb_gateway)
+
+
+async def _add_movie_posters(
+    recs: list[dict], recsys_repo: OnlineRecSysRepo, tmdb_gateway: TMDBGateway
+):
     logger.debug("Getting movie posters...")
     movie_ids = [r["id"] for r in recs]
     posters_bytes = await recsys_repo.aget_movie_posters(movie_ids)
@@ -165,6 +235,7 @@ async def amain_test():
     recsys_repo = await get_recsys_repo(aconn)
     recsys_model = await get_recsys_model()
     tmdb_gateway = get_tmdb_gateway()
+    vectorizer = Vectorizer(OpenAIEmbeddings())
 
     user_id = 1
     k = 15
@@ -186,7 +257,7 @@ async def amain_test():
     ]
 
     for movie_id, label in zip(*seq_data):
-        recs = await get_recs(recsys_repo, tmdb_gateway, user_id, k)
+        recs = await get_movies(None, recsys_repo, tmdb_gateway, vectorizer, user_id, k)
         # recs = [(rec[0], rec[1], rec[4], rec[3], rec[2][:100]) for rec in recs]
         print(json.dumps(recs, indent=2))
         await add_to_batch(
@@ -201,7 +272,7 @@ async def amain_test():
 app = FastAPI()
 
 
-MAX_N_BATCH = 1
+MAX_N_BATCH = 5
 NORMALIZED_LR = 0.3
 templates = Jinja2Templates(directory="online_learning_demo/templates")
 
@@ -216,18 +287,23 @@ async def user_home(
     request: Request,
     recsys_repo: Annotated[OnlineRecSysRepo, Depends(get_recsys_repo)],
     tmdb_gateway: Annotated[TMDBGateway, Depends(get_tmdb_gateway)],
+    vectorizer: Annotated[Vectorizer, Depends(get_vectorizer)],
     limit: int = 15,
     offset: int = 0,
 ):
-    recs = await get_recs(
+    query = None
+    recs = await get_movies(
+        query=query,
         recsys_repo=recsys_repo,
         tmdb_gateway=tmdb_gateway,
+        vectorizer=vectorizer,
         user_id=user_id,
         k=limit,
         offset=offset,
     )
     for r in recs:
         r["user_id"] = user_id
+        r["query"] = query
     recs[-1]["offset"] = offset + limit
     recs[-1]["limit"] = limit
 
@@ -237,21 +313,26 @@ async def user_home(
 @app.get("/next/")
 async def _(
     user_id: int,
+    query: str | None,
     request: Request,
     recsys_repo: Annotated[OnlineRecSysRepo, Depends(get_recsys_repo)],
     tmdb_gateway: Annotated[TMDBGateway, Depends(get_tmdb_gateway)],
+    vectorizer: Annotated[Vectorizer, Depends(get_vectorizer)],
     limit: int = 15,
     offset: int = 0,
 ):
-    recs = await get_recs(
+    recs = await get_movies(
+        query=query,
         recsys_repo=recsys_repo,
         tmdb_gateway=tmdb_gateway,
+        vectorizer=vectorizer,
         user_id=user_id,
         k=limit,
         offset=offset,
     )
     for r in recs:
         r["user_id"] = user_id
+        r["query"] = query
     recs[-1]["offset"] = offset + limit
     recs[-1]["limit"] = limit
 
@@ -263,16 +344,49 @@ async def _(
     user_id: int,
     recsys_repo: Annotated[OnlineRecSysRepo, Depends(get_recsys_repo)],
     tmdb_gateway: Annotated[TMDBGateway, Depends(get_tmdb_gateway)],
+    vectorizer: Annotated[Vectorizer, Depends(get_vectorizer)],
     limit: int = 15,
     offset: int = 0,
 ):
-    return await get_recs(
+    return await get_movies(
+        query=None,
         recsys_repo=recsys_repo,
         tmdb_gateway=tmdb_gateway,
+        vectorizer=vectorizer,
         user_id=user_id,
         k=limit,
         offset=offset,
     )
+
+
+@app.post("/search/")
+async def _(
+    user_id: Annotated[int, Form()],
+    request: Request,
+    recsys_repo: Annotated[OnlineRecSysRepo, Depends(get_recsys_repo)],
+    tmdb_gateway: Annotated[TMDBGateway, Depends(get_tmdb_gateway)],
+    vectorizer: Annotated[Vectorizer, Depends(get_vectorizer)],
+    query: Annotated[str | None, Form()] = "",
+    limit: Annotated[int, Form()] = 15,
+    offset: Annotated[int, Form()] = 0,
+):
+    query = query if query else None
+    recs = await get_movies(
+        query=query,
+        recsys_repo=recsys_repo,
+        tmdb_gateway=tmdb_gateway,
+        vectorizer=vectorizer,
+        user_id=user_id,
+        k=limit,
+        offset=offset,
+    )
+    for r in recs:
+        r["user_id"] = user_id
+        r["query"] = query
+    recs[-1]["offset"] = offset + limit
+    recs[-1]["limit"] = limit
+
+    return templates.TemplateResponse("rows.html", {"movies": recs, "request": request})
 
 
 @app.post("/batch-feedback/")
