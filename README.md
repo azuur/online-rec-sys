@@ -21,6 +21,7 @@
 ### Technical debt
 
 - Split out stuff into files
+- Add typing for movies (Pydantic models)
 - Move tests into tests
 - Add a makefile for the different processes?
 - Fill in this README with actual setup instructions
