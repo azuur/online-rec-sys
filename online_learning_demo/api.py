@@ -224,7 +224,8 @@ async def add_to_batch(
 
     n_in_batch = await recsys_repo.aget_current_batch_size(user_id)
 
-    if n_in_batch >= max_n_in_batch:
+    batch_has_both = any(labels) and not all(labels)
+    if n_in_batch >= max_n_in_batch and batch_has_both:
         await update_user_vec(
             recsys_repo, recsys_model, user_id, normalized_lr=normalized_lr
         )
