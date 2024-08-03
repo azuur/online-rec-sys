@@ -1,4 +1,5 @@
 # TODO Use cases to build:
+import ast
 import base64
 import json
 from logging import getLogger
@@ -59,8 +60,10 @@ async def get_recsys_repo(aconn: Annotated[AsyncConnection, Depends(aget_db_conn
     return OnlineRecSysRepo(aconn)
 
 
-async def get_recsys_model():
-    return OnlineRecSysModel()
+async def get_recsys_model(
+    recsys_repo: Annotated[OnlineRecSysRepo, Depends(get_recsys_repo)],
+):
+    return OnlineRecSysModel(recsys_repo)
 
 
 class Vectorizer:
@@ -79,6 +82,7 @@ def get_vectorizer():
 async def get_movies(
     query: str | None,
     recsys_repo: OnlineRecSysRepo,
+    recsys_model: OnlineRecSysModel,
     tmdb_gateway: TMDBGateway,
     vectorizer: Vectorizer,
     user_id: int,
@@ -89,6 +93,7 @@ async def get_movies(
     if not query:
         return await get_recs(
             recsys_repo=recsys_repo,
+            recsys_model=recsys_model,
             tmdb_gateway=tmdb_gateway,
             user_id=user_id,
             k=k,
@@ -97,63 +102,86 @@ async def get_movies(
         )
 
     return await get_from_query(
-        query=query,
         recsys_repo=recsys_repo,
+        recsys_model=recsys_model,
         tmdb_gateway=tmdb_gateway,
         vectorizer=vectorizer,
+        user_id=user_id,
+        query=query,
         k=k,
         offset=offset,
     )
 
 
 async def get_from_query(
-    query: str,
     recsys_repo: OnlineRecSysRepo,
+    recsys_model: OnlineRecSysModel,
     tmdb_gateway: TMDBGateway,
     vectorizer: Vectorizer,
+    user_id: int,
+    query: str,
     k: int = 20,
     offset: int = 0,
 ):
     logger.debug("Getting items from search...")
 
     vec = await vectorizer(query)  # TODO: cache this
-    recs = await recsys_repo.aget_rec_from_vector(vec, k, offset)
+    raw_recs = await recsys_repo.aget_rec_from_vector(vec, k, offset)
     recs = [
         {"id": r[0], "title": r[1], "synopsis": r[2], "subtitle": r[3], "score": r[4]}
-        for r in recs
+        for r in raw_recs
     ]
+    vecs = [ast.literal_eval(r[-1]) for r in raw_recs]
+
+    model = await recsys_model.aload_model(user_id)
+    if model is not None:
+        scores = recsys_model.score_content(model, vecs)
+        for rec, score in zip(recs, scores):
+            rec["score"] = score
 
     return await _add_movie_posters(recs, recsys_repo, tmdb_gateway)
 
 
 async def get_recs(
     recsys_repo: OnlineRecSysRepo,
+    recsys_model: OnlineRecSysModel,
     tmdb_gateway: TMDBGateway,
     user_id: int,
     k: int = 20,
     p_random: float = 0.0,
     offset: int = 0,
 ):
+    model = await recsys_model.aload_model(user_id)
+    if model is None:
+        return []
+    model_vec = model.coef_[0].tolist()
+    breakpoint()
     logger.debug("Getting recommendations for user...")
     n_random = int(p_random * k)
-    recs = await recsys_repo.aget_rec_by_user_id(user_id, k - n_random, offset)
+    raw_recs = await recsys_repo.aget_rec_from_vector(model_vec, k - n_random, offset)
 
     # This happens when a user doesn't exist yet
-    if not recs:
-        return recs
+    if not raw_recs:
+        return raw_recs
 
     random_recs = []
     if n_random:
         random_recs = await recsys_repo.aget_rec_random_by_user_id(user_id, n_random)
 
     for r in random_recs:
-        i = random.randint(0, len(recs) - 1)
-        recs.insert(i, r)
+        i = random.randint(0, len(raw_recs) - 1)
+        raw_recs.insert(i, r)
+
+    vecs = [ast.literal_eval(r[-1]) for r in raw_recs]
 
     recs = [
         {"id": r[0], "title": r[1], "synopsis": r[2], "subtitle": r[3], "score": r[4]}
-        for r in recs
+        for r in raw_recs
     ]
+
+    scores = recsys_model.score_content(model, vecs)
+    for rec, score in zip(recs, scores):
+        rec["score"] = score
 
     return await _add_movie_posters(recs, recsys_repo, tmdb_gateway)
 
@@ -192,23 +220,20 @@ async def update_user_vec(
     recsys_repo: OnlineRecSysRepo,
     recsys_model: OnlineRecSysModel,
     user_id: int,
-    normalized_lr: float = 0.3,
 ):
     logger.debug("Updating user vector with batch...")
     batch = await recsys_repo.aget_current_batch(user_id)
-    user = await recsys_repo.aget_current_user(user_id)
 
     X = [row[-1] for row in batch]
     Y = [row[2] for row in batch]
-    vec = user[0][-1]
 
-    updated_user_emb = recsys_model.calculate_updated(
-        vec, (X, Y), normalized_lr=normalized_lr
-    )
+    model = await recsys_model.aload_model(user_id)
+    model = recsys_model.calculate_updated(model, (X, Y))
+    model_bytes = recsys_model.dump_model(model)
 
     new_batch_id = await recsys_repo.amove_current_batch_to_historical(user_id)
 
-    await recsys_repo.aupdate_user(user_id, new_batch_id, updated_user_emb)
+    await recsys_repo.aupdate_user(user_id, new_batch_id, model_bytes)
     logger.debug("Updating user vector with batch... SUCCESS")
 
 
@@ -219,7 +244,6 @@ async def add_to_batch(
     user_id: int,
     movie_ids: list[str],
     labels: list[bool],
-    normalized_lr: float = 0.2,
 ):
     logger.debug("Adding movies to batch...")
     await recsys_repo.aadd_to_current_batch(
@@ -232,24 +256,23 @@ async def add_to_batch(
 
     batch_has_both = any(batch_labels) and not all(batch_labels)
     if n_in_batch >= max_n_in_batch and batch_has_both:
-        await update_user_vec(
-            recsys_repo, recsys_model, user_id, normalized_lr=normalized_lr
-        )
+        await update_user_vec(recsys_repo, recsys_model, user_id)
         return True
     return False
 
 
 async def initialize_user(
-    recsys_repo: OnlineRecSysRepo, vectorizer: Vectorizer, user_id: int
+    recsys_repo: OnlineRecSysRepo, recsys_model: OnlineRecSysModel, user_id: int
 ):
     if user_id > 100 or user_id < 1:
         raise Exception("We only support 100 users for now")
 
-    vec = np.random.randn(1536)
-    vec = vec / np.sqrt(vec.dot(vec))
-    vec = vec.tolist()
+    batch = await recsys_repo.aget_user_feedback_history(user_id)
+    batch = batch or None
+    new_model = recsys_model.initialize_new_model(batch)
+    new_model_bytes = recsys_model.dump_model(new_model)
 
-    await recsys_repo.ainitialize_user(user_id, vec)
+    await recsys_repo.ainitialize_user(user_id, new_model_bytes)
 
 
 async def amain_test():
@@ -279,7 +302,9 @@ async def amain_test():
     ]
 
     for movie_id, label in zip(*seq_data):
-        recs = await get_movies(None, recsys_repo, tmdb_gateway, vectorizer, user_id, k)
+        recs = await get_movies(
+            None, recsys_repo, recsys_model, tmdb_gateway, vectorizer, user_id, k
+        )
         # recs = [(rec[0], rec[1], rec[4], rec[3], rec[2][:100]) for rec in recs]
         print(json.dumps(recs, indent=2))
         await add_to_batch(
@@ -308,6 +333,7 @@ async def user_home(
     user_id: int,
     request: Request,
     recsys_repo: Annotated[OnlineRecSysRepo, Depends(get_recsys_repo)],
+    recsys_model: Annotated[OnlineRecSysRepo, Depends(get_recsys_model)],
     tmdb_gateway: Annotated[TMDBGateway, Depends(get_tmdb_gateway)],
     vectorizer: Annotated[Vectorizer, Depends(get_vectorizer)],
     limit: int = 15,
@@ -317,6 +343,7 @@ async def user_home(
     recs = await get_movies(
         query=query,
         recsys_repo=recsys_repo,
+        recsys_model=recsys_model,
         tmdb_gateway=tmdb_gateway,
         vectorizer=vectorizer,
         user_id=user_id,
@@ -324,10 +351,11 @@ async def user_home(
         offset=offset,
     )
     if not recs:
-        await initialize_user(recsys_repo, vectorizer, user_id)
+        await initialize_user(recsys_repo, recsys_model, user_id)
         recs = await get_movies(
             query=query,
             recsys_repo=recsys_repo,
+            recsys_model=recsys_model,
             tmdb_gateway=tmdb_gateway,
             vectorizer=vectorizer,
             user_id=user_id,
@@ -351,6 +379,7 @@ async def next(
     query: str | None,
     request: Request,
     recsys_repo: Annotated[OnlineRecSysRepo, Depends(get_recsys_repo)],
+    recsys_model: Annotated[OnlineRecSysRepo, Depends(get_recsys_model)],
     tmdb_gateway: Annotated[TMDBGateway, Depends(get_tmdb_gateway)],
     vectorizer: Annotated[Vectorizer, Depends(get_vectorizer)],
     limit: int = 15,
@@ -359,6 +388,7 @@ async def next(
     recs = await get_movies(
         query=query,
         recsys_repo=recsys_repo,
+        recsys_model=recsys_model,
         tmdb_gateway=tmdb_gateway,
         vectorizer=vectorizer,
         user_id=user_id,
@@ -379,6 +409,7 @@ async def next(
 async def _(
     user_id: int,
     recsys_repo: Annotated[OnlineRecSysRepo, Depends(get_recsys_repo)],
+    recsys_model: Annotated[OnlineRecSysModel, Depends(get_recsys_model)],
     tmdb_gateway: Annotated[TMDBGateway, Depends(get_tmdb_gateway)],
     vectorizer: Annotated[Vectorizer, Depends(get_vectorizer)],
     limit: int = 15,
@@ -387,6 +418,7 @@ async def _(
     return await get_movies(
         query=None,
         recsys_repo=recsys_repo,
+        recsys_model=recsys_model,
         tmdb_gateway=tmdb_gateway,
         vectorizer=vectorizer,
         user_id=user_id,
@@ -400,6 +432,7 @@ async def _(
     user_id: Annotated[int, Form()],
     request: Request,
     recsys_repo: Annotated[OnlineRecSysRepo, Depends(get_recsys_repo)],
+    recsys_model: Annotated[OnlineRecSysRepo, Depends(get_recsys_model)],
     tmdb_gateway: Annotated[TMDBGateway, Depends(get_tmdb_gateway)],
     vectorizer: Annotated[Vectorizer, Depends(get_vectorizer)],
     query: Annotated[str | None, Form()] = "",
@@ -410,6 +443,7 @@ async def _(
     recs = await get_movies(
         query=query,
         recsys_repo=recsys_repo,
+        recsys_model=recsys_model,
         tmdb_gateway=tmdb_gateway,
         vectorizer=vectorizer,
         user_id=user_id,
@@ -426,23 +460,23 @@ async def _(
     return templates.TemplateResponse("rows.html", {"movies": recs, "request": request})
 
 
-@app.post("/batch-feedback/")
-async def _(
-    user_id: int,
-    movie_ids: list[str],
-    labels: list[bool],
-    recsys_repo: Annotated[OnlineRecSysRepo, Depends(get_recsys_repo)],
-    recsys_model: Annotated[OnlineRecSysModel, Depends(get_recsys_model)],
-):
-    await add_to_batch(
-        recsys_repo,
-        recsys_model,
-        MAX_N_BATCH,
-        user_id,
-        movie_ids,
-        labels,
-        normalized_lr=NORMALIZED_LR,
-    )
+# @app.post("/batch-feedback/")
+# async def _(
+#     user_id: int,
+#     movie_ids: list[str],
+#     labels: list[bool],
+#     recsys_repo: Annotated[OnlineRecSysRepo, Depends(get_recsys_repo)],
+#     recsys_model: Annotated[OnlineRecSysModel, Depends(get_recsys_model)],
+# ):
+#     await add_to_batch(
+#         recsys_repo,
+#         recsys_model,
+#         MAX_N_BATCH,
+#         user_id,
+#         movie_ids,
+#         labels,
+#         normalized_lr=NORMALIZED_LR,
+#     )
 
 
 @app.post("/feedback/")
@@ -461,7 +495,6 @@ async def _(
         user_id,
         [movie_id],
         [label],
-        normalized_lr=NORMALIZED_LR,
     )
 
     # response.headers["HX-Refresh"] = "true"

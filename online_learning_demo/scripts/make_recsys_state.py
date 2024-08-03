@@ -1,6 +1,10 @@
 import asyncio
+from io import BytesIO
 from dotenv import load_dotenv
+import joblib
 from langchain_openai import OpenAIEmbeddings
+import numpy as np
+from sklearn.linear_model import SGDClassifier
 from online_learning_demo.config import PGConfig
 from psycopg import AsyncConnection
 
@@ -16,6 +20,14 @@ async def amain():
     CREATE TABLE IF NOT EXISTS users_current (
         id SERIAL PRIMARY KEY,
         vec VECTOR(1536),
+        updated_at TIMESTAMP DEFAULT NOW()
+    )
+    """
+
+    create_users_table_v1_sql = """
+    CREATE TABLE IF NOT EXISTS users_current_v1 (
+        id SERIAL PRIMARY KEY,
+        sklearn_model BYTEA,
         updated_at TIMESTAMP DEFAULT NOW()
     )
     """
@@ -36,6 +48,17 @@ async def amain():
     CREATE TABLE IF NOT EXISTS users_history (
         id INTEGER,
         vec VECTOR(1536),
+        next_batch_id INTEGER,
+        moved_at TIMESTAMP DEFAULT NOW(),
+        PRIMARY KEY (id, moved_at),
+        FOREIGN KEY (id) REFERENCES users_current(id)
+    )
+    """
+
+    create_users_history_table_v1_sql = """
+    CREATE TABLE IF NOT EXISTS users_history_v1 (
+        id INTEGER,
+        sklearn_model BYTEA,
         next_batch_id INTEGER,
         moved_at TIMESTAMP DEFAULT NOW(),
         PRIMARY KEY (id, moved_at),
@@ -69,12 +92,32 @@ async def amain():
         await cur.execute(create_batches_table_sql)
         await cur.execute(create_users_history_table_sql)
         await cur.execute(create_batches_history_table_sql)
+        await cur.execute(create_users_table_v1_sql)
+        await cur.execute(create_users_history_table_v1_sql)
 
         user_id = 1
+        # await cur.execute(
+        #     "INSERT INTO users_current (id, vec) VALUES (%s, %s) "
+        #     "ON CONFLICT (id) DO UPDATE SET vec = EXCLUDED.vec",
+        #     (user_id, initial_user_emb),
+        # )
+
+        X = np.random.randn(10, 1536)
+        y = np.random.randint(2, size=10)
+
+        model = SGDClassifier(loss="log_loss")
+        model.partial_fit(X, y, classes=[0, 1])
+
+        bytes_io = BytesIO()
+        joblib.dump(model, bytes_io)
+        bytes_io.seek(0)
+
+        model_bytes = bytes_io.read()
+
         await cur.execute(
-            "INSERT INTO users_current (id, vec) VALUES (%s, %s) "
-            "ON CONFLICT (id) DO UPDATE SET vec = EXCLUDED.vec",
-            (user_id, initial_user_emb),
+            "INSERT INTO users_current_v1 (id, sklearn_model) VALUES (%s, %s) "
+            "ON CONFLICT (id) DO UPDATE SET sklearn_model = EXCLUDED.sklearn_model",
+            (user_id, model_bytes),
         )
     await aconn.commit()
 

@@ -1,13 +1,17 @@
 import ast
 import asyncio
+from io import BytesIO
 from itertools import repeat
 from logging import getLogger
 import logging
 from typing import Awaitable, Callable, Iterable
 from dotenv import load_dotenv
+import joblib
 import numpy as np
 from psycopg import AsyncConnection
 import json
+
+from sklearn.linear_model import SGDClassifier
 from online_learning_demo.config import PGConfig, TMDBConfig
 from httpx import AsyncClient
 
@@ -65,53 +69,50 @@ async def aget_db_conn():
     return await AsyncConnection.connect(pg_config.uri())
 
 
-class OnlineRecSysModel:
-    def calculate_updated(
-        self,
-        current: list[float],
-        batch: tuple[list[list[float]], list[bool]],
-        normalized_lr: float = 0.2,
-    ):
-        current_np = np.array(current)
-        X = np.array(batch[0])
-        Y = np.array(batch[1])
-        positive_data = X[Y, :]
-        negative_data = X[~Y, :]
-        n = X.shape[1]
-        positive_data = positive_data if positive_data.any() else np.zeros(n)
-        negative_data = negative_data if negative_data.any() else np.zeros(n)
-        target = positive_data.mean(axis=0) - negative_data.mean(axis=0)
-        return (normalized_lr * (target - current_np) + current_np).tolist()
-
-
 class OnlineRecSysRepo:
     def __init__(self, aconn: AsyncConnection):
         self.aconn = aconn
 
-    async def aget_rec_by_movie_id(self, movie_id: str, k: int = 5, offset: int = 0):
+    # async def aget_rec_by_movie_id(self, movie_id: str, k: int = 5, offset: int = 0):
+    #     sql = """
+    #     WITH thisvec AS (
+    #         SELECT vec
+    #         FROM movies_all
+    #         WHERE id = %s
+    #         LIMIT 1
+    #     )
+    #     SELECT
+    #         movies_all.id,
+    #         movies_all.title,
+    #         movies_all.synopsis,
+    #         movies_all.tags,
+    #         (2 - (movies_all.vec <=> thisvec.vec)) / 2 AS score
+    #     FROM movies_all, thisvec
+    #     WHERE movies_all.id <> %s
+    #     ORDER BY score DESC
+    #     OFFSET %s
+    #     LIMIT %s;
+    #     """
+    #     async with self.aconn.cursor() as cur:
+    #         res = await cur.execute(sql, (movie_id, movie_id, offset, k))
+    #         res = await res.fetchall()
+    #         return res
+
+    async def aget_model_bytes(self, user_id: int):
         sql = """
-        WITH thisvec AS (
-            SELECT vec 
-            FROM movies_all 
-            WHERE id = %s 
-            LIMIT 1
-        )
-        SELECT
-            movies_all.id,
-            movies_all.title,
-            movies_all.synopsis,
-            movies_all.tags, 
-            (2 - (movies_all.vec <=> thisvec.vec)) / 2 AS score 
-        FROM movies_all, thisvec
-        WHERE movies_all.id <> %s
-        ORDER BY score DESC
-        OFFSET %s
-        LIMIT %s;
+        SELECT id, sklearn_model 
+        FROM users_current_v1
+        WHERE id = %s
+        LIMIT 1
         """
+
         async with self.aconn.cursor() as cur:
-            res = await cur.execute(sql, (movie_id, movie_id, offset, k))
-            res = await res.fetchall()
-            return res
+            result = await cur.execute(sql, (user_id,))
+            result = await result.fetchall()
+
+        if result:
+            return next(iter(result))[1]
+        return None
 
     async def aget_rec_by_user_id(self, user_id: str, k: int = 5, offset: int = 0):
         sql = """
@@ -135,7 +136,8 @@ class OnlineRecSysRepo:
             movies_all.title,
             movies_all.synopsis,
             movies_all.tags, 
-            (2 - (movies_all.vec <=> thisvec.vec)) / 2 AS score 
+            (2 - (movies_all.vec <=> thisvec.vec)) / 2 AS score,
+            movies_all.vec
         FROM movies_all, thisvec
         WHERE movies_all.id NOT IN (SELECT movie_id FROM already_watched)
         ORDER BY score DESC
@@ -173,7 +175,8 @@ class OnlineRecSysRepo:
             movies_all.title,
             movies_all.synopsis,
             movies_all.tags, 
-            (2 - (movies_all.vec <=> thisvec.vec)) / 2 AS score 
+            (2 - (movies_all.vec <=> thisvec.vec)) / 2 AS score,
+            movies_all.vec
         FROM movies_all TABLESAMPLE BERNOULLI(1){f' REPEATABLE({seed})' if seed else ''}, thisvec
         WHERE movies_all.id NOT IN (SELECT movie_id FROM already_watched)
         LIMIT %(limit)s;
@@ -190,7 +193,8 @@ class OnlineRecSysRepo:
             movies_all.title,
             movies_all.synopsis,
             movies_all.tags, 
-            (2 - (movies_all.vec <=> %(vec)s)) / 2 AS score 
+            (2 - (movies_all.vec <=> %(vec)s)) / 2 AS score,
+            movies_all.vec
         FROM movies_all
         ORDER BY score DESC
         OFFSET %(offset)s
@@ -270,23 +274,25 @@ class OnlineRecSysRepo:
         await self.aconn.commit()
         return result[0]
 
-    async def aupdate_user(self, user_id: int, batch_id: int | None, vec: list[float]):
+    async def aupdate_user(
+        self, user_id: int, batch_id: int | None, model_bytes: bytes
+    ):
         insert_sql = """
-        INSERT INTO users_history (id, vec, next_batch_id)
-        SELECT id, vec, %(batch_id)s
-        FROM users_current
+        INSERT INTO users_history_v1 (id, sklearn_model, next_batch_id)
+        SELECT id, sklearn_model, %(batch_id)s
+        FROM users_current_v1
         WHERE id = %(user_id)s;
         """
         update_sql = """
-        UPDATE users_current
-        SET vec = %(vector)s, updated_at = NOW()
+        UPDATE users_current_v1
+        SET sklearn_model = %(model_bytes)s :: BYTEA, updated_at = NOW()
         WHERE id = %(user_id)s;
         """
         async with self.aconn.cursor() as cur:
             await cur.execute(insert_sql, {"user_id": user_id, "batch_id": batch_id})
             await cur.execute(
                 update_sql,
-                {"user_id": user_id, "vector": vec},
+                {"user_id": user_id, "model_bytes": model_bytes},
             )
         await self.aconn.commit()
 
@@ -326,14 +332,82 @@ class OnlineRecSysRepo:
             )
         await self.aconn.commit()
 
-    async def ainitialize_user(self, user_id: int, vec: list[float]):
+    async def ainitialize_user(self, user_id: int, model_bytes: bytes):
         async with self.aconn.cursor() as cur:
             await cur.execute(
-                "INSERT INTO users_current (id, vec) VALUES (%s, %s) "
-                "ON CONFLICT (id) DO UPDATE SET vec = EXCLUDED.vec",
-                (user_id, str(vec)),
+                "INSERT INTO users_current_v1 (id, sklearn_model) VALUES (%s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET sklearn_model = EXCLUDED.sklearn_model",
+                (user_id, model_bytes),
             )
         await self.aconn.commit()
+
+    async def aget_user_feedback_history(self, user_id: int):
+        sql = """
+        WITH hist as (
+            SELECT label, movie_id FROM batches_history WHERE user_id = %s
+        )
+        SELECT hist.label, movies_all.vec
+        FROM hist
+        JOIN movies_all
+        ON hist.movie_id = movies_all.id
+        """
+        async with self.aconn.cursor() as cur:
+            res = await cur.execute(sql, (user_id,))
+            res = await res.fetchall()
+            if not res:
+                return None
+            return list(zip(*[(mid, ast.literal_eval(vec)) for mid, vec in res]))
+
+
+class OnlineRecSysModel:
+    def __init__(self, recsys_repo: OnlineRecSysRepo) -> None:
+        self.recsys_repo = recsys_repo
+
+    async def aload_model(self, user_id: int):
+        model_bytes = await self.recsys_repo.aget_model_bytes(user_id)
+        if not model_bytes:
+            return None
+        model_buffer = BytesIO(model_bytes)
+        model: SGDClassifier = joblib.load(model_buffer)
+        return model
+
+    def calculate_updated(
+        self,
+        model: SGDClassifier,
+        batch: tuple[list[list[float]], list[bool]],
+    ):
+        X = np.array(batch[0])
+        y = np.array(batch[1]).astype(int)
+        model.partial_fit(X, y)
+        return model
+
+    def score_content(self, model: SGDClassifier, batch: list[list[float]]):
+        X = np.array(batch)
+        return model.predict_proba(X)[:, 1].tolist()
+
+    def dump_model(self, model: SGDClassifier):
+        bytes_io = BytesIO()
+        joblib.dump(model, bytes_io)
+        bytes_io.seek(0)
+        return bytes_io.read()
+
+    def initialize_new_model(
+        self, batch: tuple[list[list[float]], list[bool]] | None = None
+    ):
+        breakpoint()
+        if batch is not None:
+            X = (1 / np.sqrt(1536)) * np.random.randn(100, 1536)
+            y = [0, 1] + np.random.randint(2, size=98).tolist()
+        else:
+            X = np.array(batch[0])
+            y = np.array(batch[1]).astype(int)
+
+        # maybe fiddle with params
+        model = SGDClassifier(
+            loss="log_loss", alpha=1, learning_rate="constant", eta0=0.1
+        )
+        model.fit(X, y)
+        return model
 
 
 class AsyncOperationWithSemaphore[K, V]:
@@ -470,6 +544,15 @@ async def amain():
     # await self._ainsert_movie_posters(((k, v) for k, v in new_imgs.items()))
 
     # result.update(new_imgs)
+
+
+async def amain():
+    aconn = await aget_db_conn()
+    recsys_repo = OnlineRecSysRepo(aconn=aconn)
+    recsys_model = OnlineRecSysModel(recsys_repo=recsys_repo)
+
+    model = await recsys_model.aload_model(1)
+    breakpoint()
 
 
 if __name__ == "__main__":

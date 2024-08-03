@@ -24,6 +24,12 @@ CREATE TABLE IF NOT EXISTS users_current (
     updated_at TIMESTAMP DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS users_current_v1 (
+    id SERIAL PRIMARY KEY,
+    sklearn_model BYTEA,
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS batches_current (
     user_id INTEGER,
     movie_id CHAR(9),
@@ -37,6 +43,15 @@ CREATE TABLE IF NOT EXISTS batches_current (
 CREATE TABLE IF NOT EXISTS users_history (
     id INTEGER,
     vec VECTOR(1536),
+    next_batch_id INTEGER,
+    moved_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (id, moved_at),
+    FOREIGN KEY (id) REFERENCES users_current(id)
+);
+
+CREATE TABLE IF NOT EXISTS users_history_v1 (
+    id INTEGER,
+    sklearn_model BYTEA,
     next_batch_id INTEGER,
     moved_at TIMESTAMP DEFAULT NOW(),
     PRIMARY KEY (id, moved_at),
